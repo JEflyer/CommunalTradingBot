@@ -2,8 +2,6 @@ pragma solidity 0.8.15;
 
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-
 contract Trader is ReentrancyGuard {
 
     address private admin;
@@ -17,9 +15,8 @@ contract Trader is ReentrancyGuard {
     IUniswapV2Router02 private router;
 
     struct StakeData {
-        address staker;
         uint256 amountStaked;
-        uint256 blockStaked;
+        uint256 stepStaked;
     }
 
     struct Order {
@@ -41,6 +38,7 @@ contract Trader is ReentrancyGuard {
     uint256 lastPrice;
 
     struct Step {
+        uint256 totalUSDDeposited;
         uint256 profit;
         uint256 currentUSDBal;
         uint256 currentETHBal;
@@ -97,67 +95,90 @@ contract Trader is ReentrancyGuard {
 
     function stakeFunds(uint256 amount) external {
 
+        //Check that the amount being staked is greater than zero
         require(amount != 0,"ERR:NA");//NA => Null Amount
 
+        //Retrieve the address of the caller
         address caller = _msgSender();
 
+        //Build an instance of the ERC20 interface for USDC
         IERC20 token = IERC20(USDC);
 
+        //Retrieve the amount the caller has approved this contract to spend
         uint256 amountApproved = token.allowance(caller,address(this));
 
+        //Check that the amount approved is greater than or equal to the amount the caller is trying to stake
         require(amountApproved >= amount,"ERR:NE");//NE => Not Enough
 
+        //Pull the StakeData for this caller
         StakeData storage data = stakingData[caller];
 
-        require(data.blockStaked == 0, "ERR:AS");
+        //Check that the user has not already staked
+        require(data.stepStaked == 0, "ERR:AS");
 
+        //Transfer the USD from the caller to this contract
         token.transferFrom(caller,address(this),amount);
 
-        data.amountStaked = amount;
-        data.blockStaked = block.nunber;
-        data.staker = caller;
-
         //Save info on step
+        Step storage step = stepDetails[++currentStepID];
+        step.currentETHBal = address(this).balance;
+        step.currentUSDBal = token.balanceOf(address(this));
+        step.blockNum = block.number;
+        step.totalUSDDeposited += amount;
 
-        uint256 stepID = ++currentStepID;
+        //Save the callers stake data
+        data.amountStaked = amount;
+        data.stepStaked = currentStepID;
+
 
         //Emit event
-
     }
 
     function withdrawFunds() external {
 
+        address caller = msg.sender;
+
         StakeData storage data = stakingData[caller];
 
-        require(data.blockStaked != 0, "ERR:AS");
+        require(data.stepStaked != 0, "ERR:AS");
         
-
         //Calculate the total reward
-
+        uint256 payout = data.amountStaked + calculateDueReward();
 
         //Payout user
-
-        //Delete stake info
-
+        IERC20(USDC).transfer(caller, payout);
 
         //Save info on step
+        Step storage step = stepDetails[++currentStepID];
+        step.currentETHBal = address(this).balance;
+        step.currentUSDBal = token.balanceOf(address(this));
+        step.blockNum = block.number;
+        step.totalUSDDeposited -= data.amountStaked;
+
+        //Delete stake info
+        delete data;
 
         //Emit event
 
     }
 
-    function calculateDueReward(address query) public view returns(uint256) {
-        //Find the step ID for the block the user staked on
+    function calculateDueReward(address query) public view returns(uint256 reward) {
+        //Find the stakeData the user staked on
+        StakeData memory data = stakingData[caller];
 
         //Iterate through all the steps since
+        for(uint256 i = data.stepStaked; i <= currentStepID; ){
 
-        //If a sale was made this step
+            Step memory step = stepDetails[i];
+            
+            if(step.madeSale){
+                reward += (data.amountStaked * step.profit) / step.totalUSDDeposited;
+            }
 
-        //Then the query wallet receives a proportional % reward based on their staked amount vs the total staked amount for that step
-
-
-
-        //Return the total amount    
+            unchecked{
+                i++;
+            }
+        }
     }
 
     function update() external {
@@ -252,6 +273,10 @@ contract Trader is ReentrancyGuard {
                 step.currentUSDBal = token.balanceOf(address(this));
                 step.blockNum = block.number;
                 
+                if(step.totalUSDDeposited == 0){
+                    step.totalUSDDeposited = stepDetails[currentStepID - 1].totalUSDDeposited;
+                }
+                
             }
             
             //Pull the active ordersIDs into memory
@@ -303,6 +328,10 @@ contract Trader is ReentrancyGuard {
                     step.currentUSDBal = token.balanceOf(address(this));
                     step.currentETHBal = address(this).balance;
                     step.madeSale = true;
+                    
+                    if(step.totalUSDDeposited == 0){
+                        step.totalUSDDeposited = stepDetails[currentStepID - 1].totalUSDDeposited;
+                    }
 
                     //Close this order ID
                     closedOrderIDs.push(activeOrderIDs[i]);
